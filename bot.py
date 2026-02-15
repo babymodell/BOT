@@ -1,4 +1,5 @@
-# bot.py (fixed for Railway + Discord)
+# bot.py — FIXED VERSION
+
 import os
 import re
 import asyncio
@@ -6,6 +7,7 @@ import discord
 from dotenv import load_dotenv
 from openai import OpenAI
 
+# load env vars (Railway automatically provides them)
 load_dotenv()
 
 DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
@@ -13,6 +15,10 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
 ALLOWED_CHANNEL_ID = os.getenv("ALLOWED_CHANNEL_ID")
 ROAST_MODE = (os.getenv("ROAST_MODE") or "mild").lower()
 
+# use correct valid model
+OPENAI_MODEL = (os.getenv("OPENAI_MODEL") or "gpt-4o-mini").strip()
+
+# validation
 if not DISCORD_TOKEN:
     raise RuntimeError("DISCORD_TOKEN fehlt.")
 if not OPENAI_API_KEY:
@@ -22,110 +28,118 @@ if not ALLOWED_CHANNEL_ID or not ALLOWED_CHANNEL_ID.isdigit():
 
 ALLOWED_CHANNEL_ID = int(ALLOWED_CHANNEL_ID)
 
+# init openai
 ai = OpenAI(api_key=OPENAI_API_KEY)
 
+# discord setup
 intents = discord.Intents.default()
-intents.message_content = True  # requires Message Content Intent enabled in Discord dev portal
+intents.message_content = True
+
 bot = discord.Client(intents=intents)
 
+
+# ---------------- utils ----------------
+
 def sanitize(text: str) -> str:
-    # ping-sicher
-    text = text.replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
+    text = text.replace("@everyone", "@\u200beveryone")
+    text = text.replace("@here", "@\u200bhere")
     return text.strip()
+
 
 def style_rules(mode: str) -> str:
     if mode == "spicy":
         return (
-            "Frech, sarkastisch, witzig. 1–2 Sätze. "
-            "Keine Slurs, keine Drohungen, keine Angriffe auf geschützte Merkmale, "
-            "kein sexual content, kein self-harm."
+            "Sei frech, sarkastisch und witzig. 1–2 kurze Sätze. "
+            "Keine Slurs, keine Drohungen."
         )
     return (
-        "Neckisch-frech, humorvoll, PG-13. 1–2 Sätze. "
-        "Keine harten Beleidigungen, keine Slurs, keine Drohungen, "
-        "keine Angriffe auf geschützte Merkmale, kein sexual content, kein self-harm."
+        "Sei frech, aber humorvoll und PG-13. 1–2 kurze Sätze."
     )
+
 
 def remove_bot_mentions(text: str) -> str:
     if bot.user:
-        text = re.sub(rf"<@!?{bot.user.id}>\s*", "", text).strip()
-    return text
+        text = re.sub(rf"<@!?{bot.user.id}>", "", text)
+    return text.strip()
 
-def extract_output_text(resp) -> str:
-    parts = []
-    for item in resp.output:
-        if item.type == "message":
-            for c in item.content:
-                if c.type == "output_text":
-                    parts.append(c.text)
-    return "".join(parts)
+
+# ---------------- AI ----------------
 
 async def generate_reply(user_name: str, content: str) -> str:
-    model = "gpt-5.2-mini"
+
     system = (
-        "Du bist ein Discord-Bot, der auf jede Nachricht frech antwortet.\n"
+        "Du bist ein frecher Discord-Bot.\n"
         + style_rules(ROAST_MODE)
-        + "\nAntworte NUR mit dem Text. Optional 0–1 Emoji."
-    )
-    user = (
-        f"User: {user_name}\n"
-        f"Message: {content}\n"
-        "Gib eine passende freche Antwort."
+        + "\nAntworte kurz."
     )
 
-    # IMPORTANT: OpenAI SDK call is synchronous; run it in a thread so the bot stays responsive
-    def call_openai() -> str:
+    user = f"{user_name} schrieb: {content}"
+
+    def call_openai():
+
         resp = ai.responses.create(
-            model=model,
+            model=OPENAI_MODEL,
             input=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
-            temperature=0.95,
-            max_output_tokens=70,
+            temperature=0.9,
+            max_output_tokens=60,
         )
-        out = sanitize(extract_output_text(resp))
-        return out or "Okay… und jetzt?"
 
-    return await asyncio.to_thread(call_openai)
+        # FIX: use output_text (stable)
+        reply = getattr(resp, "output_text", "")
+
+        return sanitize(reply) or "Du bist sprachlos? Ich auch."
+
+    try:
+        return await asyncio.to_thread(call_openai)
+
+    except Exception as e:
+        print("OpenAI ERROR:", repr(e))
+        return "Ich wollte dich roasten, aber mein Gehirn hat dich gesehen und aufgegeben."
+
+
+# ---------------- discord events ----------------
 
 @bot.event
 async def on_ready():
-    print(f"😈 KI-Frechbot läuft als {bot.user} | Channel: {ALLOWED_CHANNEL_ID}")
+    print(f"😈 Bot online als {bot.user}")
+    print(f"📡 Channel: {ALLOWED_CHANNEL_ID}")
+    print(f"🧠 Model: {OPENAI_MODEL}")
+
 
 @bot.event
 async def on_message(message: discord.Message):
-    # ignore bots (prevents bot-loops)
+
+    # ignore bots
     if message.author.bot:
         return
 
-    # debug log so you can verify messages arrive + channel id matches
-    print(f"[MSG] channel={message.channel.id} author={message.author} content={message.content!r}")
+    print(f"[MSG] {message.channel.id} {message.author}: {message.content}")
 
-    # only respond in the allowed channel
+    # only allowed channel
     if message.channel.id != ALLOWED_CHANNEL_ID:
         return
 
-    content = (message.content or "").strip()
+    content = message.content.strip()
 
-    # handle attachment-only / sticker-only messages
     if not content and message.attachments:
-        content = "Hat ein Attachment geschickt."
-    if not content and message.stickers:
-        content = "Hat einen Sticker geschickt."
+        content = "hat ein Bild geschickt"
+
     if not content:
-        content = "…"
+        content = "..."
 
     content = remove_bot_mentions(content)
 
-    try:
-        reply = await generate_reply(message.author.display_name, content)
-        await message.reply(reply, mention_author=False)
-    except Exception as e:
-        print("OpenAI error:", repr(e))
-        await message.reply(
-            "Mein Sarkasmus-Server ist kurz umgekippt. Schreib’s nochmal.",
-            mention_author=False,
-        )
+    reply = await generate_reply(
+        message.author.display_name,
+        content
+    )
+
+    await message.reply(reply, mention_author=False)
+
+
+# ---------------- start bot ----------------
 
 bot.run(DISCORD_TOKEN)
